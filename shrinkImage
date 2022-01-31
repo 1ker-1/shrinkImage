@@ -1,0 +1,258 @@
+#!/bin/bash
+# -- shrinkImage --
+#Script for automatically shrinking images above a certain filesize in a folder
+#Requires ImageMagick to be installed
+
+#Sets default variables
+#FILEEXTS="";		#List of file extensions to search for; currently unused until I figure out expansion for the regex
+INDIR="${PWD}";		#Directory that contains the image files; default is the current working directory
+OUTDIR="${INDIR}";	#Output directory; set to the same as input by default
+TEMPDIR="/tmp";		#Directory to place shrunk images in for evaluation; currently using /tmp
+MAXSIZE="4M";		#Maximum allowed file size, suffixes allowed; 4M is the maximum allowed on 4chan.org
+MINQUAL="95";		#Minimum JPEG quality allowed; if desired size cannot be reached with this setting, the script will try downscaling the image instead. Default quality is 97
+SHRINKSTEP="5"		#Set by how many percent the image should be shrunken per step when resizing; default is 5%
+#MINDIM="50"		#Sets the minimum image size percentage (currently unused)
+SUFFIX="_sm"		#The suffix to append to the original filename
+OVERWRITE=0			#Set whether existing files should be overwritten; 0 for no, 1 for yes
+
+#Internal variables (DO NOT CHANGE)
+OUTDIR_SET=0		#Specifies whether the output directory has been set
+BYTEMARK=""			#If the max size is given in bytes, set this to 'c' to tell find that -size is given in bytes and not .5k blocks (why is this default?)
+
+function help(){ #Help text; invoked with -h or --help
+	cat << EOF
+shrinkImage: automatically shrink all images in a folder to a specified size
+Usage: $0 [OPTIONS]
+
+OPTIONS:
+
+	-h, --help
+		Print this message. Hi!
+	-i, --indir <input directory>
+		Specifies input directory.
+		Default is the current working directory.
+	-o, --outdir <output directory>
+		Specifies output directory.
+		Default is the same as the input directory.
+	-t, --tempdir <temporary directory>
+		Specifies temporary directory.
+		Default is ${TEMPDIR}
+	-s, --size <file size>
+		Specifies maximum desired file size. Shorthand (eg 256k, 4M etc) is allowed.
+		Default is ${MAXSIZE}.
+	-q, --quality <1-100>
+		Specifies minimum JPEG quality allowed before downscaling image.
+		Default is ${MINQUAL}%.
+	--shrink <1-99>
+		Specifies by how many % to shrink the image dimensions per step when downscaling
+		Default is ${SHRINKSTEP}%.
+	--suffix <suffix>
+		Specifies the suffix appended to shrunken files.
+		Default is '${SUFFIX}'.
+	--overwrite
+		Overwrite existing files
+		
+Cobbled together by 1ker
+
+EOF
+}
+
+while [ ! $# -eq 0 ] #Loop to read command-line options
+do
+	case "$1" in
+	-h | --help)
+		help #Show help text, then exit
+		exit
+		;;
+	-i | --indir)
+		if [ -d "$2" ] #Check if input dir exists, otherwise exit with error
+		then
+			INDIR="$2"
+			shift
+		else
+			printf "Input directory must be an existing directory\n"
+			exit 1
+		fi
+		;;
+	-o | --outdir)
+		if [ -d "$2" ] #Check if output dir exists, otherwise exit with error
+		then
+			OUTDIR="$2"
+			OUTDIR_SET=1
+			shift
+		else
+			printf "Output directory must be an existing directory\n"
+			exit 1
+		fi
+		;;
+	-t | --tempdir)
+		if [ -d "$2" ] #Check if temp dir exists, otherwise exit with error
+		then
+			TEMPDIR="$2"
+			shift
+		else
+			printf "Temporary directory must be an existing directory\n"
+			exit 1
+		fi
+		;;
+	-s | --size)
+		if [[ "$2" =~ ^[0-9]+[bBkKmMgG]?$ ]] #Check if specified file size is valid
+		then
+			MAXSIZE="$2"
+			shift
+		else
+			printf "You must specify a valid file size when using this option\n"
+			exit 1
+		fi
+		;;
+	-q | --quality)
+		if [ "$2" -gt 0 ] && [ "$2" -le 100 ] #Check if JPEG quality is valid
+		then
+			MINQUAL="$2"
+			shift
+		else
+			printf "Quality must be between 0 and 100 (below 95 not recommended)\n"
+			exit 1
+		fi
+		;;
+	--shrink)
+		if [ "$2" -gt 0 ] && [ "$2" -lt 100 ] #Check is shrink step size is valid
+		then
+			SHRINKSTEP="$2"
+			shift
+		else
+			printf "Shrink step size must be between 0 and 100\n"
+			exit 1
+		fi
+		;;
+	--suffix)
+		if [ "$2" ]
+		then
+			SUFFIX="$2";
+			shift
+		else
+			print "You must specify a suffix to append when using this option\n"
+			exit 1
+		fi
+		;;
+	--overwrite) #Overwrite existing files
+		OVERWRITE=1
+		;;
+	*)
+		printf "Unrecognized option: %s\nSee --help for help\n" "$1" #Catchall for unrecognized options
+		exit 1
+		;;
+	esac
+	shift
+done
+
+if ! command -v convert &> /dev/null #Check if ImageMagick is installed; if not, print message and exit
+then
+	printf "\nImageMagick not found. Please make sure ImageMagick is installed and included in \$PATH\n"
+	exit 1
+fi
+
+if [ "$OUTDIR_SET" -eq 0 ] #If the output directory was not specified in the options, set it to the input directory
+then
+	OUTDIR="${INDIR}"
+fi
+
+case "${MAXSIZE: -1}" in #Converts $MAXSIZE to bytes as this is what wc prints file sizes in
+	g | G)
+		let MAXSIZEB=${MAXSIZE:: -1}*1073741824
+		;;
+	m | M)
+		let MAXSIZEB=${MAXSIZE:: -1}*1048576
+		;;
+	k | K)
+		let MAXSIZEB=${MAXSIZE:: -1}*1024
+		;;
+	b | B)
+		let MAXSIZEB=${MAXSIZE:: -1}
+		BYTEMARK="c" #If size is specified in bytes, append 'c' to the --size option of find to specify that we're specifying it to search in bytes
+		;;
+	*)
+		let MAXSIZEB=${MAXSIZE}
+		BYTEMARK="c"
+		;;
+esac
+
+#Print current options to user and await confirmation
+cat << EOF
+
+-- Current Settings --
+Input directory:	${INDIR}
+Output directory:	${OUTDIR}
+Temp directory:		${TEMPDIR}
+Maximum filesize:	${MAXSIZE}
+Minimum JPEG quality:	${MINQUAL}%
+Shrink per step:	${SHRINKSTEP}%
+Suffix:			'${SUFFIX}'
+Overwrite existing:	$([ $OVERWRITE -eq 1 ] && echo "Yes" || echo "No")
+
+EOF
+
+read -p "Is this correct? (Y/n)" -n 1 -s
+
+if [[ "${REPLY}" == [^Yy] ]]
+then
+	printf "\nExiting...\n"
+	exit 0
+fi
+
+printf "\nSearching for files above %s...\n" "${MAXSIZE}"
+
+#Find all image files in the directory that exceed the maximum size and put them in the array $FILES using the mapfile builtin. Requires bash 4 or later, macfags btfo
+mapfile -d $'\0' FILES < <(find "${INDIR}" -maxdepth 1 -type f -regextype posix-extended -regex '(.+\.png|.+\.jpg|.+\.jpeg|.+\.webp|.+\.jfif|.+\.tif|.+\.tiff|.+\.bmp)' -size +"${MAXSIZE}${BYTEMARK}" -print0)
+
+#Show files found and await confirmation
+printf "Files found:\n"
+printf "%s\n" "${FILES[@]}"
+
+read -p "Continue? (Y/n)" -n 1 -s
+if [[ "${REPLY}" == [^Yy] ]]
+then
+	printf "\nExiting...\n"
+	exit 0
+fi
+
+#Increase the default ImageMagick memory/disk limitations to avoid out-of-cache errors
+export MAGICK_DISK_LIMIT="10GiB"
+export MAGICK_MAP_LIMIT="4GiB"
+export MAGICK_MEMORY_LIMIT="4GiB"
+
+for FILE in "${FILES[@]}" #The loop that shrinks every file that exceed the size limit
+do
+	BASENAME=$(basename "${FILE}")			#Get the filename without the path
+	FILENAME="${BASENAME%.*}"				#Remove the file extension
+	NEWFILE="${FILENAME}${SUFFIX}.jpg"		#Generate the new filename
+	TEMPFILE="${TEMPDIR}/${NEWFILE}"		#This is where the resized file is placed for evaluation
+	let QUAL=100; 							#Set the initial JPEG quality setting to 100
+	let SIZE=100-${SHRINKSTEP}				#Set the image size to 100% minus one step
+	
+	#Repeatedly shrink the image until it meets the desired filesize (the first test makes sure the file exists so that wc doesn't throw an error)
+	printf "\nAttempting to shrink %s...\n" "${BASENAME}"
+	if [ ! -e "${OUTDIR}/${NEWFILE}" ] || [ "${OVERWRITE}" -eq 1 ]
+	then
+		printf "Saving as %s\n" "${TEMPFILE}"
+		until [ -f "${TEMPFILE}" ] && [ $(wc -c 2> /dev/null < "${TEMPFILE}") -lt ${MAXSIZEB} ]
+		do
+			if [ ${QUAL} -ge ${MINQUAL} ]
+			then
+				#Until the quality setting is lower than the minimum, try decreasing the quality until the image reaches desired size
+				printf "Saving as JPEG with quality %s%%\n" "${QUAL}"
+				convert "${FILE}" -quality "${QUAL}" "${TEMPFILE}"
+				(( QUAL-- ))
+			else
+				#If the lowest quality setting was not successful in decreasing the file size enough, try shrinking the image dimensions instead
+				printf "Saving as JPEG with quality %s%% and size %s%%\n" "${MINQUAL}" "${SIZE}"
+				(( SIZE -= SHRINKSTEP ))
+				convert "${FILE}" -quality "${MINQUAL}" -resize "${SIZE}%" "${TEMPFILE}"
+			fi	
+		done
+		printf "Success! Moving file to %s...\n" "${OUTDIR}"
+		mv "${TEMPFILE}" "${OUTDIR}"
+	else
+		printf "${NEWFILE} already exists, and will not be overwritten.\nTo overwrite existing files, please run script with the --overwrite flag.\n"
+	fi
+done
